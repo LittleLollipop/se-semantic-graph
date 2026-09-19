@@ -143,8 +143,21 @@ class SEManticGraph:
             props["updated_at"] = ts_now()
         self._g.upsert_vertex(props)
 
-        # 挂到根（walk 枚举用）
-        if self._raw_edge(ROOT_ID, id_str) is None:
+        # 挂到根（walk 枚举用）。不挂 ⇒ 该节点对 `stats` / `list` / `trace` **永久隐形**，
+        # 而没有任何一处报错（`doctor` 的 ① 能查出来，但那已经晚了）。
+        #
+        # 🔴 2026-09-19 修：**不要用 `get_edge` 判断"根边在不在"**。引擎的
+        #    `get_edge` 跨进程会偶发误判（`graph_crud` 里早写着"勿用 get_edge ——
+        #    跨进程偶发返回 False 误判"，改用它自己的 `out_neighbors` 计数）。
+        #    实测后果：`add` 报"节点已写入"，但根边被误判成已存在而**没建**
+        #    ⇒ 新增的节点是隐形的（本项目真踩到过一次，靠 doctor 才捞出来）。
+        try:
+            sid = str_to_id(ROOT_ID)
+            tid = str_to_id(id_str)
+            have = sum(1 for n in self._g._g.out_neighbors(sid) if n == tid)
+        except Exception:
+            have = 0            # 拿不准就往"没挂上"处理：宁可多一条根边，也不要隐形节点
+        if have == 0:
             self._raw_add_edge(ROOT_ID, id_str, "has_member")
         return {"id": id_str, "label": label, "type": node_type}
 
