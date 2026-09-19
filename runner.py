@@ -226,19 +226,23 @@ def cmd_doctor(args):
     而作者们常用的 `graph_crud bulk` **不会**。症状是"我明明写过这个节点，它却没出现"，
     而**没有任何一处会报错** —— 正是最该被一条命令拦住的那种问题。
 
-    四项检查（任一有问题 ⇒ exit 1，可以直接当门禁跑）：
+    五项检查（任一有问题 ⇒ exit 1，可以直接当门禁跑）：
 
       ① **枚举完整性**：live 节点里有多少不在 walk 范围内（= 写了但看不见）
-      ② **类型越界**：`type` 不在 `schema.NODE_TYPES` 里（按类型统计/过滤会漏掉它）
-      ③ **重边**：同一 (src,dst) 出现 >1 次（引擎 raw add_edge 会偶发产出平行边）
-      ④ **id 污染**：`props['id']` 变成纯数字（症状：get 入边为空、list --prefix 漏检）
+      ② **节点类型越界**：`type` 不在 `schema.NODE_TYPES` 里（按类型统计/过滤会漏掉它）
+      ③ **边类型越界**：kind 不在 `schema.EDGE_KINDS` 里。**用得多的算失败**（≥5 次）；
+         用过 1~4 次的只**报警不动手** —— 它们各自有细微差别、方向也未必一致，
+         批量改名会把语义搞错，那部分该由人逐条判
+      ④ **重边**：同一 (src,dst) 出现 >1 次（引擎 raw add_edge 会偶发产出平行边）
+      ⑤ **id 污染**：`props['id']` 变成纯数字（症状：get 入边为空、list --prefix 漏检）
 
     ⚠️ 修法各不同，别混：
       ① 补 `edge_add {from: ROOT_ID, to: <id>, kind: has_member}`（就这一条边的事）
       ② 改名（`upsert` 带新 type；**content 要传原 content**，别传 node_body ——
          本项目 62% 的节点正文在 `summary` 里，传 node_body 会造出重复正文）
-      ③ `edge_rm` 再 `edge_add`（`edge_rm` 会删光该点对的全部副本，所以 rm+add = 去重）
-      ④ 见 `graph_crud check-ids`
+      ③ 登记进 `schema.EDGE_KINDS`，或并到语义最近的已登记 kind（**先并纯同义词**）
+      ④ `edge_rm` 再 `edge_add`（`edge_rm` 会删光该点对的全部副本，所以 rm+add = 去重）
+      ⑤ 见 `graph_crud check-ids`
     """
     try:
         import graph_crud as GC
@@ -281,26 +285,43 @@ def cmd_doctor(args):
     else:
         print(f"✅ ② 类型越界：全部在 schema 的 {len(NODE_TYPES)} 种内")
 
-    # ③ 重边
+    # ③ 边类型越界（用得多才算失败；1~4 次的长尾只报警 —— 见 docstring 的理由）
+    off_k = collections.Counter(e[2] for e in edges if e[2] not in EDGE_KINDS)
+    big = {k: c for k, c in off_k.items() if c >= 5}
+    tail = {k: c for k, c in off_k.items() if c < 5}
+    if big:
+        problems += 1
+        print("❌ ③ 边类型越界（用得多却没登记）："
+              + "、".join(f"{k}×{c}" for k, c in sorted(big.items(), key=lambda x: -x[1])))
+        print("   修：登记进 schema.EDGE_KINDS，或并到语义最近的已登记 kind（先并纯同义词）")
+    else:
+        print("✅ ③ 边类型越界：用过 ≥5 次的 kind 都已在 schema 内")
+    if tail:
+        print("   ⚠️ 长尾（用过 1~4 次的自造 kind，%d 种 / %d 条）：%s"
+              % (len(tail), sum(tail.values()),
+                 "、".join(f"{k}×{c}" for k, c in sorted(tail.items(), key=lambda x: -x[1]))))
+        print("     不算失败：各有细微差别、方向未必一致，批量改名风险大于收益 ⇒ 留给人逐条判")
+
+    # ④ 重边
     dup = collections.Counter((e[0], e[1]) for e in edges)
     dup = {k: v for k, v in dup.items() if v > 1}
     if dup:
         problems += 1
-        print(f"❌ ③ 重边：{len(dup)} 组（引擎 raw add_edge 的已知 quirk）")
+        print(f"❌ ④ 重边：{len(dup)} 组（引擎 raw add_edge 的已知 quirk）")
         for (a, b), c in list(dup.items())[:5]:
             print(f"   {a} -> {b} ×{c}")
         print("   修：对每对先 `edge_rm` 再 `edge_add`（rm 会删光全部副本 ⇒ 净剩 1 条）")
     else:
-        print("✅ ③ 重边：无平行重复边")
+        print("✅ ④ 重边：无平行重复边")
 
-    # ④ id 污染
+    # ⑤ id 污染
     bad_id = [i for i, d in nodes.items()
               if str(d.get("id") or "").isdigit()]
     if bad_id:
         problems += 1
-        print(f"❌ ④ id 污染：{len(bad_id)} 个节点的 props['id'] 是纯数字：{bad_id[:5]}")
+        print(f"❌ ⑤ id 污染：{len(bad_id)} 个节点的 props['id'] 是纯数字：{bad_id[:5]}")
     else:
-        print("✅ ④ id 污染：无")
+        print("✅ ⑤ id 污染：无")
 
     print(f"\nDOCTOR {'✅ 健康' if problems == 0 else f'❌ {problems} 类问题'}")
     sys.exit(1 if problems else 0)

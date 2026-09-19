@@ -123,6 +123,23 @@ KIND_FLOWS = "flows"                  # 数据流相关
 KIND_AFFECTS = "affects"              # 决策 → 任意（决策影响）
 KIND_REJECTS = "rejects"              # 决策 → 被否方案（被否）
 
+# ── 2026-09-19 从**实践**吸收的边类型 ──────────────────────
+#
+# 🔴 背景：一次真实图库普查（SerpentSurge，987 条边）发现 **37 种越界边类型**，
+#    其中 `has_member` 352 条、`relates_to` 56 条 —— 也就是说"实践早就长出了
+#    它需要的边，而 schema 里没有"，于是 `connect` 会拒绝写、语法书与实况不符。
+#
+# 吸收判据（与节点类型同一条）：**用得够多（≥5 条）且语义不与其他 kind 重合**。
+# 反过来，只用过 1~4 次、明显是近义写法的，**归并不登记**（见 SKILL.md）。
+KIND_HAS_MEMBER = "has_member"        # 结构挂载（root → 节点；也用作文档式归属）
+KIND_RELATES_TO = "relates_to"        # 相关（对称、无方向语义；`related` / `mirrors` /
+                                      #   `sibling_of` / `complements` 都并到这里）
+KIND_EXTENDS = "extends"              # 扩展（A 在 B 的基础上扩了范围）
+KIND_REFINES = "refines"              # 细化 / 修订（`amends` / `corrects` 并到这里）
+KIND_SUPERSEDES = "supersedes"        # 取代（B 已失效，A 是它的后续版本）
+KIND_USES = "uses"                    # 使用（A 用到 B；比 `depends_on` 弱）
+KIND_SUPPORTS = "supports"            # 支撑（证据 / 实现 支撑某个结论或规则）
+
 EDGE_KINDS = {
     KIND_DRIVES: "画像驱动需求",
     KIND_CONSTRAINS: "约束",
@@ -135,6 +152,13 @@ EDGE_KINDS = {
     KIND_FLOWS: "流转",
     KIND_AFFECTS: "影响",
     KIND_REJECTS: "否决",
+    KIND_HAS_MEMBER: "挂载",
+    KIND_RELATES_TO: "相关",
+    KIND_EXTENDS: "扩展",
+    KIND_REFINES: "细化",
+    KIND_SUPERSEDES: "取代",
+    KIND_USES: "使用",
+    KIND_SUPPORTS: "支撑",
 }
 
 # 查询语义：反向追溯时这些 kind 表示"向问题域走"（读 why）

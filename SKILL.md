@@ -72,21 +72,43 @@ $PY $RUN types                                 # 列出全部节点/边类型
 
 ```
 $PY $RUN doctor
-[图库体检] 节点 422 ｜ 边 987
+[图库体检] 节点 425 ｜ 边 991
 ✅ ① 枚举完整性：所有 live 节点都可达
 ✅ ② 类型越界：全部在 schema 的 17 种内
-✅ ③ 重边：无平行重复边
-✅ ④ id 污染：无
+✅ ③ 边类型越界：用过 ≥5 次的 kind 都已在 schema 内
+   ⚠️ 长尾（用过 1~4 次的自造 kind，23 种 / 35 条）：solves×3、documents×3、…
+✅ ④ 重边：无平行重复边
+✅ ⑤ id 污染：无
 ```
 
-四项检查与各自的修法（**别混**）：
+五项检查与各自的修法（**别混**）：
 
 | 检查 | 修法 |
 |---|---|
 | ① 枚举完整性（live 节点不在 walk 内）| 补一条 `edge_add {from: ROOT_ID, to: <id>, kind: has_member}` |
-| ② 类型越界（`type` 不在 `NODE_TYPES`）| `upsert` 带新 type 改名 —— ⚠️ **content 传原 content，别传 `node_body`** |
-| ③ 重边（同一 (src,dst) >1 条）| 对每对先 `edge_rm` 再 `edge_add`（`rm` 会删光全部副本 ⇒ 净剩 1 条）|
-| ④ id 污染 | 见 `graph_crud check-ids` |
+| ② 节点类型越界 | `upsert` 带新 type 改名 —— ⚠️ **content 传原 content，别传 `node_body`** |
+| ③ 边类型越界（≥5 次）| 登记进 `schema.EDGE_KINDS`，或并到语义最近的 kind（**先并纯同义词**）|
+| ④ 重边（同一 (src,dst) >1 条）| 对每对先 `edge_rm` 再 `edge_add`（`rm` 会删光全部副本 ⇒ 净剩 1 条）|
+| ⑤ id 污染 | 见 `graph_crud check-ids` |
+
+### 边类型越界：**分两档处理**，长尾不要动（2026-09-19 实测）
+
+同一个项目图库普查出 **37 种越界 kind**，其中 `has_member` 352 条、`relates_to` 56 条 ——
+**实践早就长出了它需要的边，而 schema 里没有**（`connect` 会拒绝写）。分两档：
+
+**A. 用得多的 ⇒ 吸收进 schema。** 判据与节点类型同源：**用得够多（≥5 条）
+且语义不与其他 kind 重合**。一次整理吸收了 7 种：`has_member` / `relates_to` /
+`extends` / `refines` / `supersedes` / `uses` / `supports`。
+
+**B. 纯同义词 ⇒ 并到主流写法。** 一次并掉 48 条边：
+`related` / `related_to` / `sibling_of` / `complements` / `mirrors` → `relates_to`
+（都是无方向的关联）；`amends` / `corrects` → `refines`（都是对既有东西做修订）。
+
+**C. 长尾（用过 1~4 次，这个库有 23 种 / 35 条）⇒ 只报警，不自动改。**
+它们各自有细微差别（`closes` vs `closes_partial` vs `resolves` vs `answers`…），
+而且**方向未必一致** —— 批量改名会把语义搞错，风险大于收益。
+`doctor` 会列出它们，但**不算失败**；那部分留给人在真要查那几条边时逐条判。
+⚠️ 别把 doctor 报的长尾当成"待办清单"去清空 —— 那会把 35 条边的语义清成 0 信息。
 
 ### 两条批量操作的坑（都在同一次整理里踩到）
 
