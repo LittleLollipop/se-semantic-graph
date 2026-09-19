@@ -180,6 +180,30 @@ class SEManticGraph:
                 break
         return out
 
+    def set_content(self, id_str: str, text: str) -> bool:
+        """把节点的**正文**写成 `text`（写进 `content` 字段），其余字段不动。
+
+        🔴 为什么需要它（2026-09-19 实证）：本技能的 `upsert_node` 把正文写在
+        **`summary`**（那是 seed 脚本的字段），而读侧 `node_body` 是
+        「`content` 优先，回落 `summary`」，底层 `graph_crud append` 又只写 `content`。
+        于是**用本技能建的节点一旦被 append 追加，正文就裂成两半**：
+        summary 一半、content 一半 —— 而 `node_body` 只显示 content 那一半，
+        读起来就像"原来的内容被删了"。实测踩到过一次（`decision_graph_types_five_domains`）。
+
+        ⇒ 两条路都要有：`upsert_node`（建节点，走 summary，兼容 seed）
+        + `set_content`（改正文，走 content，兼容 graph_crud 与所有读侧）。
+        要"追加一段"就用 `runner.py append`（它读 node_body 再整体写回 content，
+        所以**永远不会裂**）。
+        """
+        v = self._g.get_vertex(id_str)
+        if v is None:
+            return False
+        props = dict(v)
+        props["content"] = text
+        props["updated_at"] = ts_now()
+        self._g.upsert_vertex(props)
+        return True
+
     # ── Read: enumerate ────────────────────────────────
 
     def _iter_all_vertices(self) -> dict:

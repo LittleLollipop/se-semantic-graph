@@ -1,6 +1,6 @@
 {
   "name": "se-semantic-graph",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "display_name": "软件工程语义图谱",
   "display_name_en": "Software Engineering Semantic Graph",
   "description": "把项目全知识域（客户画像/需求/成本/架构/分层/模块运行逻辑/历史决策）落进 axolotl 图库，修 bug/加功能/重构时沿跨域语义边定向查询精确上下文，根治上下文爆炸与注意力分散。替代把整个项目塞进 prompt 硬扛。",

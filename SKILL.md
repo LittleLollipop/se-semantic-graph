@@ -51,6 +51,7 @@ $PY $RUN add --id <id> --label <名> --type <类型> --summary <一句话> --sou
 $PY $RUN connect --from <id> --to <id> --kind <边类型> [--note <说明>]
 $PY $RUN get --id <id>                         # 读节点 + **正文** + 出/入边
                                                #   （`--no-content` 只要元信息）
+$PY $RUN append --id <id> --file <文件>        # 追加正文（写 content，**永不裂**）
 $PY $RUN trace --start <id> --direction up|down --depth 4 [--verbose]   # 核心
 $PY $RUN list --type <类型>
 $PY $RUN stats
@@ -121,7 +122,14 @@ $PY $RUN doctor
 判据：改完跑一次**逐字段比对**（`content` / `summary` 的 md5、`weight`、`domain`、
 `label`、`status`）—— 只有 `type` 该变。
 
-**② 批量补边之后必跑 `scan-dups`。** 引擎的 `raw add_edge` 会**偶发为同一对
+**② 用底层 `graph_crud append` 追加「技能建的节点」会把正文写成两半。**
+本技能 `add` 建节点时正文在 `summary`（seed 字段），底层 append 只写 `content`，
+而读侧 `node_body` 是「content 优先」⇒ 追加完之后**只看得见新追加的那半段**，
+读起来像"原内容被删了"（实测踩到过一次）。
+⇒ 追加一律走 `runner.py append`：它先取 `node_body` 再整体写回 `content`，
+所以永远不会裂；也不要在库里直接手改 `summary`（重跑 seed 会覆盖它）。
+
+**③ 批量补边之后必跑 `scan-dups`。** 引擎的 `raw add_edge` 会**偶发为同一对
 生成平行边**（工具自己的注释里有记录）。一次给 root 补 161 条边之后实测多出 7 组重边。
 ⇒ 补边 → `scan-dups` → 有重边就 `rm + add` 去重（代码见上表）。
 

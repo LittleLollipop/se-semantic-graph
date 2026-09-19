@@ -10,7 +10,8 @@
 - list: 列出节点
 - stats: 统计
 - get: 读一个节点（含正文）
-- doctor: 图库体检（枚举完整性 / 类型越界 / 重边 / id 污染）
+- doctor: 图库体检（枚举完整性 / 节点类型 / 边类型 / 重边 / id 污染）
+- append: 追加正文（写 content，永不裂）
 
 用法示例见 SKILL.md。所有路径可经环境变量覆盖：
   SE_SEMANTIC_ENGINE  引擎目录（默认 ~/.workbuddy/skills/lobster-memory）
@@ -217,6 +218,45 @@ def cmd_get(args):
         print(x)
 
 
+def cmd_append(args):
+    """在节点正文末尾追加一段，**写进 `content`**（读侧 `node_body` 优先读它）。
+
+    🔴 与底层 `graph_crud append` 的区别（2026-09-19 实证）：
+    底层只写 `content`，而本技能 `add` 建节点时正文在 **`summary`**（seed 字段）
+    ⇒ 于是"技能建的节点 + 底层 append"= 正文**裂成两半**（summary 一半、content 一半），
+    而读侧只看 content 那一半，读起来像"原内容被删了"。
+    本命令先取 `node_body`（content 优先、回落 summary）再整体写回 content，
+    所以**永远不会裂**。追加前会查重（开头 20 字已在正文里就跳过）。
+    """
+    text = args.text
+    if not text and not args.file and not sys.stdin.isatty():
+        text = sys.stdin.read()
+    if args.file:
+        text = open(args.file, encoding="utf-8").read()
+    if not text or not text.strip():
+        sys.stderr.write("[se-semantic-graph] append 需要 --file 或 --text（或 stdin）\n")
+        sys.exit(2)
+    sg = _graph(getattr(args, "project", None))
+    n = sg.get_node(args.id)
+    if not n:
+        print(f"节点不存在: {args.id}")
+        sg.close()
+        sys.exit(1)
+    old = (n.get("content") or "").strip() or (n.get("summary") or "").strip()
+    t = text.strip()
+    if t[:20] and t[:20] in old:
+        print(f"⏭️  已含该片段开头（{t[:20]!r}），跳过以防重复追加")
+        sg.close()
+        return
+    sg.set_content(args.id, (old + "\n\n" + t) if old else t)
+    back = sg.get_node(args.id)
+    ok = t[:20] in ((back.get("content") or ""))
+    print(f"{'✅' if ok else '❌'} 已追加到 {args.id}：正文 {len(old)} → "
+          f"{len(back.get('content') or '')} 字（回读{'一致' if ok else '不一致'}）")
+    sg.close()
+    sys.exit(0 if ok else 1)
+
+
 def cmd_doctor(args):
     """图库体检：**一条命令**回答「这个库还健康吗」。
 
@@ -412,7 +452,13 @@ def main():
                     help="只打元信息，不打正文（默认打正文 —— 很多节点的知识全在 content 里）")
     sp.set_defaults(fn=cmd_get)
 
-    sp = sub.add_parser("doctor", help="图库体检（枚举完整性/类型越界/重边/id 污染）")
+    sp = sub.add_parser("append", help="在节点正文末尾追加一段（写 content，永不裂）")
+    sp.add_argument("--id", required=True)
+    sp.add_argument("--file", default=None, help="从文件读（推荐，免转义）")
+    sp.add_argument("--text", default=None, help="直接给文本；都不给则从 stdin 读")
+    sp.set_defaults(fn=cmd_append)
+
+    sp = sub.add_parser("doctor", help="图库体检（枚举/节点类型/边类型/重边/id 污染）")
     sp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser("list", help="列出节点")
