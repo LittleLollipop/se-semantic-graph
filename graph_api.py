@@ -126,6 +126,17 @@ class SEManticGraph:
         existing = self._g.get_vertex(id_str)
         props = _node_defaults(id_str, label, node_type, summary, detail_ref, source)
         if existing:
+            # ★ 覆盖前先取回「历史」字段（2026-09-16 修）。
+            #   `_node_defaults` 把 created_at 设成"现在"，而下面的
+            #   `setdefault` **救不了它** —— 键已经在 props 里了，所以
+            #   existing 的 created_at 永远没机会覆盖。结果：**每改写一次
+            #   节点，就把"这节点什么时候建的"改成现在**，节点历史当场不可考。
+            #   （"这条规矩什么时候定的、之后改过没" 恰恰是判断它还能不能
+            #   推翻的前提 —— 与 lobster-memory/graph_crud.py 修过的是同一个
+            #   bug，两个 skill 各有一份实现，所以各有一份这个 bug。）
+            for k in ("created_at", "access_count", "last_accessed"):
+                if existing.get(k) is not None:
+                    props[k] = existing[k]
             for k, v in existing.items():
                 props.setdefault(k, v)
             props["weight"] = existing.get("weight", 1.0) + weight
@@ -138,11 +149,19 @@ class SEManticGraph:
         return {"id": id_str, "label": label, "type": node_type}
 
     def get_node(self, id_str: str) -> dict:
+        """读一个节点，**返回全部字段**（含 `content` / `domain` / `weight` / 时间戳）。
+
+        🔴 2026-09-19 修正：旧版把字段**白名单**成 7 个
+        （id / label / type / summary / detail_ref / source / status），
+        `content` 不在其中 ⇒ 用技能读节点时**正文整个丢失**，而大量节点的知识
+        全在 `content` 里（`summary` 是空的）⇒ 只能绕回底层 `graph_crud get`。
+        **读取端静默丢字段是最坏的一类"接口缺陷"**：不报错、不提示，
+        看起来只像"这个节点没写内容"。宁可多给，由调用方自己决定显示什么。
+        """
         v = self._g.get_vertex(id_str)
         if v is None:
             return {}
-        return {k: v.get(k) for k in
-                ("id", "label", "type", "summary", "detail_ref", "source", "status")}
+        return dict(v)
 
     def list_nodes(self, node_type: str = None, limit: int = 500) -> list:
         out = []

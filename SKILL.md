@@ -43,17 +43,78 @@ pip install --force-reinstall --no-deps target/wheels/axolotl_rs-*.whl
 
 ```bash
 PY=<lobster-memory venv python>   # 有 axolotl_rs 的那个
-RUN=~/path/to/se-semantic-graph/runner.py
-export SE_SEMANTIC_DIR=<项目自己的图目录>
+RUN=~/.workbuddy/skills/se-semantic-graph/runner.py
 
+cd <项目根>                       # ← 唯一需要的"配置"：在项目根目录下调用
 $PY $RUN init                                  # 初始化项目图
 $PY $RUN add --id <id> --label <名> --type <类型> --summary <一句话> --source <来源>
 $PY $RUN connect --from <id> --to <id> --kind <边类型> [--note <说明>]
+$PY $RUN get --id <id>                         # 读节点 + **正文** + 出/入边
+                                               #   （`--no-content` 只要元信息）
 $PY $RUN trace --start <id> --direction up|down --depth 4 [--verbose]   # 核心
 $PY $RUN list --type <类型>
 $PY $RUN stats
 $PY $RUN types                                 # 列出全部节点/边类型
 ```
+
+库目录**自动推导** = `~/.workbuddy/se-semantic-graph/<当前目录名小写>/`。
+也可 `--project <dir>` 显式指定（须写在子命令**之前**），或 `SE_SEMANTIC_DIR` 覆盖。
+
+## 🔴 库放在哪：**技能数据目录**，不要放项目里
+
+这不是偏好，是**不弹窗的唯一前提**。2026-09-19 用户连问三次"为什么一直弹窗"之后查清：
+
+### 判据不是"要不要提权"，而是"**路径**"
+- 产品数据目录 `~/.workbuddy/` **默认放行** —— 实测 `init` / `add` / `stats` / `get` 全零弹窗
+- 工作区之外的**其它**路径，任何写都要授权 —— 而图库「**只读也会写**」：
+  - `MemoryGraph.__init__` 用 `open(lock, "w")` 建 `<db>.lock`
+  - `MemoryGraph.close()` → Rust 侧**原子保存**（写 `.tmp` 再 rename 覆盖 `<db>`）
+  - 而 **rename 覆盖在安全策略里被判成「删除」**（`audit-log` 里的事件是
+    `file-safety.RequestDelete`）⇒ 同一个库文件被请求授权 **380 次**
+  - 带 `dangerouslyDisableSandbox` 只是把弹窗换成一次点击，**根因没动**
+
+### 所以别照抄"库放项目里"
+- 放项目里**没有好处**：`.semantic-graph/` 本来就 gitignored，进不了版本控制
+- 代价却是**每次读写弹一次窗**
+- 放技能数据目录后：零弹窗、**不需要每个项目登记**、也不需要手配 `SE_SEMANTIC_DIR`
+
+### 若确实需要动工作区外的文件（项目代码 / git / 引擎重建）
+那是另一层（`sandbox.extraAllowWrite`，见 `settings.json`），且该数组由 Security Center
+在**启动时 reconcile** 写入 —— 手工加可能被覆盖 ⇒ **要长期生效请在「安全中心」UI 里加**。
+
+### 判据（别看"有没有弹窗"，看输出）
+一次真实写 + **新进程回读**，命令里**不带** `dangerouslyDisableSandbox`：
+输出里既无 `SANDBOX EXECUTION REJECTED`、也无 `⚠️ Sandbox bypassed`，
+且 `close()` 不抛 `Io("Operation not permitted (os error 1)")` ⇒ 路径是放行的。
+⚠️「新进程回读」是唯一真值 —— CLI 打印的成功行、`⚠️ Sandbox bypassed` 那行，都不算证据。
+
+### 迁移已有库（库原本在项目里）
+```bash
+mkdir -p ~/.workbuddy/se-semantic-graph/<项目名小写>
+cp <项目>/.semantic-graph/memory.axeb ~/.workbuddy/se-semantic-graph/<项目名小写>/
+$PY $RUN stats     # 在项目根下跑，节点/边数应与迁移前一致
+```
+
+⚠️ **能走 `runner.py` 就别绕底层** `lobster-memory/tools/graph_crud.py`：绕底层的代价是
+手拼路径、手写 bulk JSON（`content` 里的直引号会**静默炸整批**）、以及自己判断沙箱。
+缺接口就补 runner —— `get` 就是这么补上来的。
+
+### 🔴 读取端**静默丢字段**是最坏的一类"接口缺陷"（2026-09-19 实录）
+
+`get` 补上来之后又踩了一次：`runner.py get` 只打 `summary`，而**大量节点的知识全在
+`content` 里、`summary` 是空的**（例：`decision_grass_materials_13` 的 13 种材料表）。
+用技能读到的是一具空壳 ⇒ 又只能绕回底层 `graph_crud get` ——
+**用户抱怨的"你总绕开技能"有一半是这类接口缺陷造成的。**
+
+根因在 `graph_api.get_node()`：它把字段**白名单**成 7 个
+（id/label/type/summary/detail_ref/source/status），**`content` 不在其中**。
+现在两处都改了：
+- `graph_api.get_node()` → `return dict(v)`（**返回全部字段**，宁可多给）
+- `runner.py get` → 默认打印 `content`（要元信息用 `--no-content`）
+
+⚠️ 一般化：**读接口不要做字段白名单**。加一条边/加一个字段是进化的常态，
+白名单会让"节点没写内容"和"读取端把它丢了"看起来一模一样。
+自己写库的读函数时同理 —— 丢掉字段不报错，这才是它危险的地方。
 
 ## 四域节点类型
 

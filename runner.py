@@ -26,30 +26,69 @@ if _SKILL_DIR not in sys.path:
 from graph_api import SEManticGraph, DEFAULT_GRAPH_FILE  # noqa: E402
 from schema import NODE_TYPES, EDGE_KINDS  # noqa: E402
 
-GRAPH_DIR = os.environ.get(
-    "SE_SEMANTIC_DIR", os.path.expanduser("~/.workbuddy/se-semantic-graph")
-)
+## ── 库目录解析（2026-09-19 改）
+##
+## 🔴 **不要把库放进项目目录，也不要每次手配 `SE_SEMANTIC_DIR`。**
+##
+## 库放项目里 = 每次读写都触发「工作区外删除保护」的授权弹窗：
+## 引擎 `close()` 是**原子保存**（写 `<db>.tmp` 再 rename 覆盖原文件），
+## 而 rename 覆盖在安全策略里被判成**删除** ⇒ 每次操作弹一次。
+## 实测：同一个库文件被请求授权 **380 次**（`~/.workbuddy/audit-log/*.jsonl`
+## 的 `file-safety.RequestDelete`）。
+##
+## 而 `~/.workbuddy/` 是产品数据目录、**默认放行** ⇒ 库放这里零弹窗（已实测）。
+## 这也正是本技能 `SE_SEMANTIC_DIR` 的默认值 —— 一开始就该用这里。
+DEFAULT_ROOT = os.path.expanduser("~/.workbuddy/se-semantic-graph")
+
+## 项目根的常见标记。用途只有一个：**在 cwd 不像项目时提醒一声** ——
+## 否则"按当前目录名推导"会在错误的位置静默建一个新库（症状是"我的节点不见了"）。
+_PROJECT_MARKERS = (".git", "project.godot", "package.json", "pyproject.toml",
+                    "go.mod", "Cargo.toml", "pom.xml", "build.gradle")
 
 
-def _graph():
-    os.makedirs(GRAPH_DIR, exist_ok=True)
-    return SEManticGraph(os.path.join(GRAPH_DIR, DEFAULT_GRAPH_FILE))
+def _looks_like_project(d: str) -> bool:
+    return any(os.path.exists(os.path.join(d, m)) for m in _PROJECT_MARKERS)
+
+
+def resolve_graph_dir(project: str = None) -> str:
+    """库目录：`SE_SEMANTIC_DIR` > `<DEFAULT_ROOT>/<项目名小写>`。
+
+    `project` 缺省用当前工作目录 ⇒ **在项目根目录下调用时无需任何配置**。
+    每个项目一个子目录，互不干扰，也不必逐个登记。
+    """
+    env = os.environ.get("SE_SEMANTIC_DIR")
+    if env:
+        return env
+    src = os.path.abspath(project or os.getcwd())
+    if project is None and not _looks_like_project(src):
+        sys.stderr.write(
+            "[se-semantic-graph] ⚠️ %s 不像项目根（没找到 %s）—— 库目录仍按它的名字推导。"
+            "要指定别的目录用 `--project <dir>`（写在子命令前）或环境变量 SE_SEMANTIC_DIR。\n"
+            % (src, "/".join(_PROJECT_MARKERS[:4])))
+    slug = os.path.basename(src).lower().replace(" ", "-")
+    return os.path.join(DEFAULT_ROOT, slug)
+
+
+def _graph(project: str = None):
+    d = resolve_graph_dir(project)
+    os.makedirs(d, exist_ok=True)
+    return SEManticGraph(os.path.join(d, DEFAULT_GRAPH_FILE))
 
 
 def cmd_init(args):
-    g = _graph()
+    g = _graph(getattr(args, "project", None))
     try:
         st = g.stats()
         g.close()
     except Exception as e:
         sys.stderr.write(f"[se-semantic-graph] init 失败: {e}\n")
         sys.exit(1)
-    print(f"已初始化项目语义图谱: {GRAPH_DIR}")
+    print(f"已初始化项目语义图谱: {resolve_graph_dir(getattr(args, 'project', None))}")
     print(f"  当前: {st['vertices']} 节点 | {st['edges']} 边")
 
 
 def cmd_add(args):
-    g = _graph()
+    g = _graph(getattr(args, "project", None))
     try:
         r = g.upsert_node(
             id_str=args.id,
@@ -67,7 +106,7 @@ def cmd_add(args):
 
 
 def cmd_connect(args):
-    g = _graph()
+    g = _graph(getattr(args, "project", None))
     try:
         r = g.connect(args.from_id, args.to_id, args.kind, note=args.note or "")
         g.close()
@@ -78,7 +117,7 @@ def cmd_connect(args):
 
 
 def cmd_trace(args):
-    g = _graph()
+    g = _graph(getattr(args, "project", None))
     try:
         r = g.trace(
             start_id=args.start,
@@ -111,8 +150,60 @@ def cmd_trace(args):
             print(f"  {'  ' * d}{frm} --{kind}--> {to}")
 
 
+def cmd_get(args):
+    """读一个节点的字段 + 出/入边。
+
+    ⚠️ 这个子命令是 2026-09-19 补的：在那之前 runner 只有 `list` / `trace`，
+    "读单个节点"没有入口 ⇒ 每次都得绕到底层 `graph_crud.py get --db <路径>`，
+    于是又得手拼路径、又要自己判断沙箱。**能走技能就别绕底层。**
+    （实现用的是 `graph_api.SEManticGraph.get_node` —— 它一直在，只是没暴露。）
+
+    🔴 2026-09-19 二次修正：**默认打印 `content`**。第一版只打 `summary`，
+    而很多节点的 `summary` 是空的（知识全在 `content` 里 —— 例如
+    `decision_grass_materials_13` 的 13 种材料表）⇒ 用技能读等于读了个空壳，
+    于是又得绕回底层 `graph_crud get`。**"用技能读不到正文"是接口缺陷，
+    不是使用者的姿势问题。** 只要元信息时用 `--no-content`。
+    """
+    g = _graph(getattr(args, "project", None))
+    try:
+        n = g.get_node(args.id)
+        r = g.trace(start_id=args.id, direction="both", max_depth=1) if n else {}
+        g.close()
+    except Exception as e:
+        sys.stderr.write(f"[se-semantic-graph] get 失败: {e}\n")
+        sys.exit(1)
+    if not n:
+        print(f"节点不存在: {args.id}")
+        sys.exit(1)
+    print(f"id: {n.get('id')}")
+    print(f"label: {n.get('label')}")
+    print(f"type: {n.get('type')} | domain: {n.get('domain')} | "
+          f"weight: {n.get('weight')} | status: {n.get('status')}")
+    for k in ("summary", "detail_ref", "source"):
+        if n.get(k):
+            print(f"{k}: {n[k]}")
+    if not getattr(args, "no_content", False):
+        c = (n.get("content") or "").strip()
+        print("content:" if c else "content: （空）")
+        if c:
+            print(c)
+    outs, ins = [], []
+    for path in r.get("paths", []):
+        _d, frm, to, kind = path
+        if frm == args.id:
+            outs.append(f"  -> {to} [{kind}]")
+        elif to == args.id:
+            ins.append(f"  <- {frm} [{kind}]")
+    print("出边:")
+    for x in outs:
+        print(x)
+    print("入边:")
+    for x in ins:
+        print(x)
+
+
 def cmd_list(args):
-    g = _graph()
+    g = _graph(getattr(args, "project", None))
     try:
         nodes = g.list_nodes(node_type=args.type, limit=args.limit)
         g.close()
@@ -127,7 +218,7 @@ def cmd_list(args):
 
 
 def cmd_stats(args):
-    g = _graph()
+    g = _graph(getattr(args, "project", None))
     try:
         st = g.stats()
         g.close()
@@ -151,7 +242,13 @@ def cmd_types(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="软件工程语义图谱 CLI")
+    p = argparse.ArgumentParser(
+        description="软件工程语义图谱 CLI",
+        epilog="库目录默认 = ~/.workbuddy/se-semantic-graph/<当前目录名小写>（产品数据目录，"
+               "零弹窗）。可用环境变量 SE_SEMANTIC_DIR 覆盖；--project 需写在子命令**之前**。",
+    )
+    p.add_argument("--project", default=None,
+                   help="项目目录（缺省 = 当前工作目录；库目录按它的名字推导）")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("init", help="初始化项目图")
@@ -183,6 +280,12 @@ def main():
     sp.add_argument("--type", dest="type", default=None, help="只保留指定节点类型")
     sp.add_argument("--verbose", action="store_true", help="显示完整路径")
     sp.set_defaults(fn=cmd_trace)
+
+    sp = sub.add_parser("get", help="读一个节点 + 正文 + 出/入边")
+    sp.add_argument("--id", required=True, help="节点 id")
+    sp.add_argument("--no-content", action="store_true",
+                    help="只打元信息，不打正文（默认打正文 —— 很多节点的知识全在 content 里）")
+    sp.set_defaults(fn=cmd_get)
 
     sp = sub.add_parser("list", help="列出节点")
     sp.add_argument("--type", default=None, choices=list(NODE_TYPES) + [None])
