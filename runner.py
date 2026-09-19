@@ -9,12 +9,15 @@
 - trace: 定向遍历查询（修 bug/加功能/重构时取精确上下文）
 - list: 列出节点
 - stats: 统计
+- get: 读一个节点（含正文）
+- doctor: 图库体检（枚举完整性 / 类型越界 / 重边 / id 污染）
 
 用法示例见 SKILL.md。所有路径可经环境变量覆盖：
   SE_SEMANTIC_ENGINE  引擎目录（默认 ~/.workbuddy/skills/lobster-memory）
   SE_SEMANTIC_DIR     图文件目录（默认 ~/.workbuddy/se-semantic-graph）
 """
 import argparse
+import collections
 import json
 import os
 import sys
@@ -23,8 +26,20 @@ _SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SKILL_DIR not in sys.path:
     sys.path.insert(0, _SKILL_DIR)
 
-from graph_api import SEManticGraph, DEFAULT_GRAPH_FILE  # noqa: E402
+from graph_api import SEManticGraph, DEFAULT_GRAPH_FILE, ROOT_ID  # noqa: E402
 from schema import NODE_TYPES, EDGE_KINDS  # noqa: E402
+
+## 引擎自带的只读枚举工具（`all_nodes` / `all_edges`）。
+## 🔴 直接复用它，**不要自己再写一份 BFS** —— 引擎没有「列出全部顶点」的 API，
+##    `graph_crud._all_vertex_ids` 是「root 双向 BFS + pagerank 二次播种」才凑齐的，
+##    重写一份必然与它产生口径差异（体检工具的口径不一，比没有体检更糟）。
+_TOOLS = os.path.join(
+    os.environ.get("SE_SEMANTIC_ENGINE",
+                   os.path.expanduser("~/.workbuddy/skills/lobster-memory")),
+    "tools",
+)
+if _TOOLS not in sys.path:
+    sys.path.insert(0, _TOOLS)
 
 ## ── 库目录解析（2026-09-19 改）
 ##
@@ -202,6 +217,95 @@ def cmd_get(args):
         print(x)
 
 
+def cmd_doctor(args):
+    """图库体检：**一条命令**回答「这个库还健康吗」。
+
+    🔴 存在的理由（2026-09-19 实证，SerpentSurge 项目图库）：
+    该库 422 个节点里有 **163 个（39%）** `stats` / `list` / `trace` **根本看不到** ——
+    因为 `runner.py add` 会自动连根（`upsert_node` 末尾补 `ROOT_ID --has_member--> 新节点`），
+    而作者们常用的 `graph_crud bulk` **不会**。症状是"我明明写过这个节点，它却没出现"，
+    而**没有任何一处会报错** —— 正是最该被一条命令拦住的那种问题。
+
+    四项检查（任一有问题 ⇒ exit 1，可以直接当门禁跑）：
+
+      ① **枚举完整性**：live 节点里有多少不在 walk 范围内（= 写了但看不见）
+      ② **类型越界**：`type` 不在 `schema.NODE_TYPES` 里（按类型统计/过滤会漏掉它）
+      ③ **重边**：同一 (src,dst) 出现 >1 次（引擎 raw add_edge 会偶发产出平行边）
+      ④ **id 污染**：`props['id']` 变成纯数字（症状：get 入边为空、list --prefix 漏检）
+
+    ⚠️ 修法各不同，别混：
+      ① 补 `edge_add {from: ROOT_ID, to: <id>, kind: has_member}`（就这一条边的事）
+      ② 改名（`upsert` 带新 type；**content 要传原 content**，别传 node_body ——
+         本项目 62% 的节点正文在 `summary` 里，传 node_body 会造出重复正文）
+      ③ `edge_rm` 再 `edge_add`（`edge_rm` 会删光该点对的全部副本，所以 rm+add = 去重）
+      ④ 见 `graph_crud check-ids`
+    """
+    try:
+        import graph_crud as GC
+    except ImportError as e:
+        sys.stderr.write(f"[se-semantic-graph] doctor 需要引擎工具目录：{_TOOLS}\n  {e}\n")
+        sys.exit(2)
+    sg = _graph(getattr(args, "project", None))
+    nodes = GC.all_nodes(sg._g._g)
+    edges = GC.all_edges(sg._g._g)
+    reach = set(sg._iter_all_vertices().keys()) | {ROOT_ID}
+    sg.close()
+
+    problems = 0
+    print(f"[图库体检] 节点 {len(nodes)} ｜ 边 {len(edges)}")
+
+    # ① 枚举完整性（`lobster_root` = 引擎自建的**全局**根，不是本项目节点，
+    #    把它挂到项目根下是错的 ⇒ 与 ② 一样单独放过）
+    unreach = sorted(i for i in nodes
+                     if i not in reach and i != "lobster_root"
+                     and (nodes[i].get("status") or "live") == "live")
+    if unreach:
+        problems += 1
+        print(f"❌ ① 枚举完整性：{len(unreach)} 个 **live** 节点不在 walk 范围内"
+              "（它们不会被 stats/list/trace 看到）")
+        print(f"   样例：{unreach[:8]}")
+        print(f"   修：补 `edge_add {{from: {ROOT_ID}, to: <id>, kind: has_member}}`")
+    else:
+        print("✅ ① 枚举完整性：所有 live 节点都可达")
+
+    # ② 类型越界（`lobster_root` 是引擎自建根，不属于本项目，单独放过）
+    off = collections.Counter(
+        d.get("type") for i, d in nodes.items()
+        if i != "lobster_root" and d.get("type") not in NODE_TYPES
+    )
+    if off:
+        problems += 1
+        print(f"❌ ② 类型越界：{len(off)} 种不在 schema 里 —— "
+              + "、".join(f"{t}×{c}" for t, c in off.most_common()))
+        print("   修：改名到 schema 内（见 SKILL.md 的「类型越界怎么收」）")
+    else:
+        print(f"✅ ② 类型越界：全部在 schema 的 {len(NODE_TYPES)} 种内")
+
+    # ③ 重边
+    dup = collections.Counter((e[0], e[1]) for e in edges)
+    dup = {k: v for k, v in dup.items() if v > 1}
+    if dup:
+        problems += 1
+        print(f"❌ ③ 重边：{len(dup)} 组（引擎 raw add_edge 的已知 quirk）")
+        for (a, b), c in list(dup.items())[:5]:
+            print(f"   {a} -> {b} ×{c}")
+        print("   修：对每对先 `edge_rm` 再 `edge_add`（rm 会删光全部副本 ⇒ 净剩 1 条）")
+    else:
+        print("✅ ③ 重边：无平行重复边")
+
+    # ④ id 污染
+    bad_id = [i for i, d in nodes.items()
+              if str(d.get("id") or "").isdigit()]
+    if bad_id:
+        problems += 1
+        print(f"❌ ④ id 污染：{len(bad_id)} 个节点的 props['id'] 是纯数字：{bad_id[:5]}")
+    else:
+        print("✅ ④ id 污染：无")
+
+    print(f"\nDOCTOR {'✅ 健康' if problems == 0 else f'❌ {problems} 类问题'}")
+    sys.exit(1 if problems else 0)
+
+
 def cmd_list(args):
     g = _graph(getattr(args, "project", None))
     try:
@@ -286,6 +390,9 @@ def main():
     sp.add_argument("--no-content", action="store_true",
                     help="只打元信息，不打正文（默认打正文 —— 很多节点的知识全在 content 里）")
     sp.set_defaults(fn=cmd_get)
+
+    sp = sub.add_parser("doctor", help="图库体检（枚举完整性/类型越界/重边/id 污染）")
+    sp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser("list", help="列出节点")
     sp.add_argument("--type", default=None, choices=list(NODE_TYPES) + [None])

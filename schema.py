@@ -33,6 +33,29 @@ TYPE_FUNCTION = "function"            # 函数锚点（挂到运行逻辑/模块
 TYPE_DECISION = "decision"            # 历史决策 ADR
 TYPE_REJECTED = "rejected"            # 被否方案
 
+# ── 证据域（2026-09-19 扩充，第五域）──────────────────────
+#
+# 🔴 为什么必须扩，而不是把这些节点改判到已有类型：
+# 实测（SerpentSurge，422 节点）长出了两类 schema 里没有、**且没有别的类型能
+# 不丢区分地覆盖**的节点：
+#
+#   · `fact`（49 条）实测事实 / 资产记录：相机 zoom=1.0、glTF 三个资源全无骨架、
+#     tile 规格 128px、某次对照的明度分布……塞进 `runtime_logic` 会让
+#     「列出所有运行逻辑」返回一堆资产清单 —— **查询语义当场作废**。
+#   · `case`（7 条）案例 / 事故：'补 L 形拐角 ⇒ 凹角自交 ⇒ 整块地形消失'。
+#     它是**发生过的事**，与 `business_rule`（以后要怎么做）是两回事：
+#     规则**引用案例作为证据**，两者要分开查。
+#
+# 判据（写在这里，免得下次又把"没见过就改名"当成整理）：
+#   **一个类型值得存在，当且仅当没有别的类型能在不丢区分的前提下覆盖它。**
+#   反过来也成立：只有 1~2 条、且明显是别的类型的近义写法（todo / lesson /
+#   fix / change / method 都属此类）—— **不要新增类型，归并掉**。
+TYPE_FACT = "fact"                    # 实测事实 / 资产记录（带数字或引用的"已核实"）
+TYPE_CASE = "case"                    # 案例 / 事故（发生过的事，可被规则引用为证据）
+
+# ── 结构锚点（不是领域类型，只是图的根，`graph_api.ROOT_ID` 指向它）──
+TYPE_PROJECT_ROOT = "project_root"
+
 NODE_TYPES = {
     TYPE_PERSONA: "客户画像",
     TYPE_REQUIREMENT: "需求",
@@ -48,6 +71,9 @@ NODE_TYPES = {
     TYPE_FUNCTION: "函数",
     TYPE_DECISION: "历史决策",
     TYPE_REJECTED: "被否方案",
+    TYPE_FACT: "实测事实",
+    TYPE_CASE: "案例",
+    TYPE_PROJECT_ROOT: "图根锚点",
 }
 
 # 域归属（用于按域过滤/统计）
@@ -66,6 +92,9 @@ DOMAIN_OF_TYPE = {
     TYPE_FUNCTION: "implementation",
     TYPE_DECISION: "decision",
     TYPE_REJECTED: "decision",
+    TYPE_FACT: "evidence",
+    TYPE_CASE: "evidence",
+    TYPE_PROJECT_ROOT: "structural",
 }
 
 # ── 边类型（kind 字段）─────────────────────────────────
